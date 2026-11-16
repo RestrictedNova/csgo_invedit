@@ -1,0 +1,4 @@
+# icons.json stores a SHA-256 of catalog.json, so the data files must keep
+# their committed bytes. Without this, Windows checkouts convert them to CRLF
+# and the editor reports that the icon manifest and catalogue differ.
+*.json -text
