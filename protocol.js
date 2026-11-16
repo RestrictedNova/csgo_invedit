@@ -13,23 +13,33 @@ export function encodeDestroy(highId) {
   return buffer;
 }
 
+// Creation sends a request ID in the item ID slot; the GC answers with setId.
 export function encodeCreate(template, requestId) {
+  return encodeItem(Command.create, template, requestId);
+}
+
+// The GC replaces the whole item (except equips) with this one, so send every field.
+export function encodeModify(item) {
+  return encodeItem(Command.modify, item, item?.highId);
+}
+
+function encodeItem(command, item, highId) {
   const encoder = new TextEncoder();
   const uint32 = (value, name) => {
     if (!Number.isInteger(value) || value < 0 || value > 0xffffffff) throw new Error(`Invalid uint32: ${name}.`);
     return value;
   };
-  if (!template || !Array.isArray(template.attributes) || !Array.isArray(template.equips)) throw new Error('Invalid item template.');
-  const values = fields.map(field => uint32(field === 'highId' ? requestId : template[field], field));
-  if (template.inUse !== 0 && template.inUse !== 1) throw new Error('inUse must be 0 or 1.');
-  const attributes = template.attributes.map(attribute => {
+  if (!item || !Array.isArray(item.attributes) || !Array.isArray(item.equips)) throw new Error('Invalid item.');
+  const values = fields.map(field => uint32(field === 'highId' ? highId : item[field], field));
+  if (item.inUse !== 0 && item.inUse !== 1) throw new Error('inUse must be 0 or 1.');
+  const attributes = item.attributes.map(attribute => {
     uint32(attribute.defIndex, 'attribute ID');
     if (typeof attribute.value !== 'string') throw new Error('Attribute values must be text.');
     const bytes = encoder.encode(attribute.value);
     uint32(bytes.byteLength, 'attribute byte length');
     return { defIndex: attribute.defIndex, bytes };
   });
-  const equips = template.equips.map(equip => ({ classId: uint32(equip.classId, 'equip class'), slotId: uint32(equip.slotId, 'equip slot') }));
+  const equips = item.equips.map(equip => ({ classId: uint32(equip.classId, 'equip class'), slotId: uint32(equip.slotId, 'equip slot') }));
   uint32(attributes.length, 'attribute count');
   uint32(equips.length, 'equip count');
   const length = 4 + values.length * 4 + 8 + attributes.reduce((size, a) => size + 8 + a.bytes.byteLength, 0) + equips.length * 8;
@@ -37,7 +47,7 @@ export function encodeCreate(template, requestId) {
   const view = new DataView(buffer);
   let offset = 0;
   const write = value => { view.setUint32(offset, value, true); offset += 4; };
-  write(Command.create);
+  write(command);
   values.forEach(write);
   write(attributes.length);
   for (const attribute of attributes) {

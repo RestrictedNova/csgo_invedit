@@ -1,4 +1,4 @@
-import { Command, decodeMessage, encodeCreate, encodeDestroy } from './protocol.js';
+import { Command, decodeMessage, encodeCreate, encodeDestroy, encodeModify } from './protocol.js';
 import { InventoryState } from './inventory-state.js';
 
 export class InventoryConnection {
@@ -20,6 +20,9 @@ export class InventoryConnection {
     this.pendingDelete = null;
     this.deleteTimer = null;
     this.deletion = null;
+    this.pendingModify = null;
+    this.modifyTimer = null;
+    this.modification = null;
   }
 
   get canCreate() {
@@ -27,7 +30,39 @@ export class InventoryConnection {
   }
 
   get canMutate() {
-    return this.inventory.ready && this.socket?.readyState === 1 && !this.pendingCreate && !this.pendingDelete;
+    return this.inventory.ready && this.socket?.readyState === 1 && !this.pendingCreate && !this.pendingDelete && !this.pendingModify;
+  }
+
+  // The GC echoes the stored item back as a modify command, which confirms the change.
+  modify(item, label) {
+    if (!this.canMutate || !this.inventory.items.has(item?.highId)) throw new Error('Saving requires a synchronized connection, an existing item, and no pending request.');
+    const bytes = encodeModify(item);
+    const pending = { highId: item.highId, label };
+    this.pendingModify = pending;
+    this.modification = { ...pending, status: 'pending', message: `Saving ${label}…` };
+    try { this.socket.send(bytes); }
+    catch (error) {
+      this.pendingModify = null;
+      this.modification = { ...pending, status: 'failed', message: `Save failed: ${error.message}` };
+      this.onChange(this);
+      return;
+    }
+    this.modifyTimer = this.setTimer(() => {
+      if (this.pendingModify !== pending) return;
+      this.modifyTimer = null;
+      this.modification = { ...pending, status: 'uncertain', message: `Changes to ${label} are unconfirmed. Wait or reconnect to inspect the fresh inventory.` };
+      this.onChange(this);
+    }, 10000);
+    this.onChange(this);
+  }
+
+  trackModification(commands) {
+    const pending = this.pendingModify;
+    if (!pending || !commands.some(c => c.type === Command.modify && c.item.highId === pending.highId) || !this.inventory.items.has(pending.highId)) return;
+    this.clearTimer(this.modifyTimer);
+    this.modifyTimer = null;
+    this.pendingModify = null;
+    this.modification = { ...pending, status: 'confirmed', message: `Saved ${pending.label}.` };
   }
 
   delete(highId, label) {
@@ -116,6 +151,13 @@ export class InventoryConnection {
     }
     this.pendingDelete = null;
     if (this.deletion?.status === 'confirmed') this.deletion = null;
+    this.clearTimer(this.modifyTimer);
+    this.modifyTimer = null;
+    if (this.pendingModify) {
+      this.modification = { ...this.pendingModify, status: 'unconfirmed', message: `Disconnected before confirming changes to ${this.pendingModify.label}. Inspect the fresh inventory after reconnecting; the save will not be retried.` };
+    }
+    this.pendingModify = null;
+    if (this.modification?.status === 'confirmed') this.modification = null;
     this.clearTimer(this.timer);
     this.timer = null;
     this.clearTimer(this.createTimer);
@@ -166,6 +208,7 @@ export class InventoryConnection {
         this.inventory.apply(commands);
         this.trackCreation(commands);
         this.trackDeletion(commands);
+        this.trackModification(commands);
         if (this.inventory.ready) {
           this.clearTimer(this.timer);
           this.timer = null;

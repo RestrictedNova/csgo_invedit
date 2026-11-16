@@ -4,6 +4,7 @@ import { loadIcons, createThumbnail, setThumbnail } from './icons.js';
 import { Presentation, filterInventory } from './presentation.js';
 import { VirtualGrid } from './grid.js';
 import { CreationPreferences } from './creation-draft.js';
+import { applyEdits, editableFields } from './item-edit.js';
 
 const $ = id => document.getElementById(id);
 let catalog = null, icons = null, iconsLoading = false, loading = false;
@@ -16,6 +17,9 @@ const narrow = matchMedia('(max-width:999px)');
 const preferences = new CreationPreferences();
 let draftError = '';
 let renderedWearKey = null, wearDirty = false;
+// Unsaved edits to the selected inventory item, keyed by field. Only touched fields are sent.
+let edits = {}, editsFor = null, savedEdits = null;
+const editInputs = { name: 'edit-name', wear: 'edit-wear', seed: 'edit-seed', counter: 'edit-counter' };
 function creationDraft() {
   draftError = '';
   if (!catalog || !selectedKey) return null;
@@ -136,6 +140,7 @@ function renderSelection() {
   $('delete').hidden = activeTab !== 'inventory';
   $('delete').disabled = !item || !connection.canMutate;
   $('deletion-status').textContent = connection.deletion?.message || '';
+  renderEditor();
   if (controls?.painted) {
     for (const id of ['wear', 'wear-slider']) { $(id).min = controls.min; $(id).max = controls.max; }
     const wear = preferences.wear === null ? controls.min : preferences.commitWear(preferences.wear, controls.min, controls.max);
@@ -165,6 +170,67 @@ function renderSelection() {
   setThumbnail($('selection-icon'), record ? (item ? icons?.candidates(item) : icons?.recordCandidates(record)) : icons?.candidates(item));
   $('create').disabled = !record || !item || !connection.canCreate;
 }
+function editTarget() {
+  const item = activeTab === 'inventory' ? connection.inventory.items.get(selectedId) : null;
+  return item ? { item, fields: editableFields(item, presentation) } : null;
+}
+function renderEditor() {
+  if (editsFor !== selectedId) { edits = {}; savedEdits = null; editsFor = selectedId; }
+  if (savedEdits === edits && connection.modification?.status === 'confirmed' && connection.modification.highId === selectedId) {
+    edits = {}; savedEdits = null;
+  }
+  $('modification-status').textContent = connection.modification?.message || '';
+  const target = editTarget();
+  const fields = target?.fields;
+  $('edit-controls').hidden = !fields || !(fields.nameable || fields.painted || fields.statTrak);
+  if (!fields) return;
+  $('edit-name-label').hidden = !fields.nameable;
+  $('edit-paint').hidden = !fields.painted;
+  $('edit-counter-label').hidden = !fields.statTrak;
+  // Rewriting an unchanged value would move the caret while typing.
+  for (const [field, id] of Object.entries(editInputs)) {
+    const value = edits[field] ?? fields.values[field];
+    if ($(id).value !== value) $(id).value = value;
+  }
+  $('edit-wear-slider').min = fields.wearMin;
+  $('edit-wear-slider').max = fields.wearMax;
+  const wear = Number(edits.wear ?? fields.values.wear);
+  if (Number.isFinite(wear)) $('edit-wear-slider').value = wear;
+  let error = '';
+  try { applyEdits(target.item, edits, fields); }
+  catch (e) { error = e.message; }
+  $('edit-error').textContent = error;
+  const dirty = Object.keys(edits).length > 0;
+  $('edit-controls').disabled = Boolean(connection.pendingModify);
+  $('edit-save').disabled = !dirty || Boolean(error) || !connection.canMutate;
+  $('edit-revert').disabled = !dirty;
+}
+function setEdit(field, value) {
+  const original = editTarget()?.fields.values[field];
+  const next = { ...edits };
+  if (value === original) delete next[field];
+  else next[field] = value;
+  edits = next;
+  renderSelection();
+}
+function saveEdits() {
+  const target = editTarget();
+  if (!target || !connection.canMutate || !Object.keys(edits).length) return;
+  try {
+    const updated = applyEdits(target.item, edits, target.fields);
+    savedEdits = edits;
+    connection.modify(updated, presentation.item(updated).name);
+  } catch (error) { $('edit-error').textContent = error.message; }
+}
+for (const [field, id] of Object.entries(editInputs)) {
+  $(id).addEventListener('input', () => setEdit(field, $(id).value));
+  $(id).addEventListener('keydown', event => {
+    if (event.key === 'Enter') { event.preventDefault(); saveEdits(); }
+  });
+}
+$('edit-wear-slider').addEventListener('input', () => setEdit('wear', $('edit-wear-slider').value));
+$('edit-save').addEventListener('click', saveEdits);
+$('edit-revert').addEventListener('click', () => { edits = {}; renderSelection(); });
 function renderCatalog(reset = false) {
   if (!catalog) return;
   const view = $('catalog-view').value;

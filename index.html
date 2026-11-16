@@ -71,6 +71,22 @@
 <label id="stattrak-label" hidden><input id="stattrak" type="checkbox"> StatTrak</label>
 <label id="counter-label" hidden>Starting counter<input id="counter" type="number" min="0" max="4294967295" step="1" value="0"></label>
 </fieldset>
+<fieldset id="edit-controls" hidden>
+<legend class="sr-only">Edit item</legend>
+<label id="edit-name-label" hidden>Name tag<input id="edit-name" type="text" autocomplete="off" spellcheck="false" placeholder="No name tag"></label>
+<div id="edit-paint" hidden>
+<label for="edit-wear">Wear</label>
+<input id="edit-wear" type="text" inputmode="decimal" autocomplete="off" spellcheck="false">
+<input id="edit-wear-slider" type="range" step="0.0001" min="0" max="1" aria-label="Wear slider">
+<label>Paint seed<input id="edit-seed" type="number" min="0" max="1000" step="1"></label>
+</div>
+<label id="edit-counter-label" hidden>StatTrak counter<input id="edit-counter" type="number" min="0" max="4294967295" step="1"></label>
+<p id="edit-error"></p>
+<div class="edit-actions">
+<button id="edit-save" disabled>Save changes</button>
+<button id="edit-revert" disabled>Revert</button>
+</div>
+</fieldset>
 <p id="selection-reason"></p>
 <button id="create" disabled>Add to inventory</button>
 <button id="delete" hidden disabled>Delete item</button>
@@ -80,6 +96,7 @@
 <div class="creation-feedback">
 <p id="creation-status" role="status" aria-live="polite"></p>
 <p id="deletion-status" role="status" aria-live="polite"></p>
+<p id="modification-status" role="status" aria-live="polite"></p>
 <button id="view-created" hidden>View in inventory</button>
 </div>
 </main>
