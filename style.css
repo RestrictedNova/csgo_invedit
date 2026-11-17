@@ -44,6 +44,9 @@ input[type=checkbox] { accent-color: #dddddd; min-height: auto; }
 input[type=search] { width: 100%; min-width: 0; }
 fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 #inventory-count, #catalog-count { font-size: 12px; margin: 12px 0; }
+.bulk-actions { display: flex; gap: 8px 12px; align-items: center; flex-wrap: wrap; }
+.bulk-actions #catalog-count { margin-right: auto; }
+.bulk-actions button { font-size: 12px; min-height: 30px; padding: 4px 12px; }
 .grid-viewport { height: clamp(360px, 65vh, 780px); overflow: auto; position: relative; scrollbar-gutter: stable; overflow-anchor: none; }
 .grid-canvas { position: relative; }
 .grid-entry { position: absolute; height: 220px; }

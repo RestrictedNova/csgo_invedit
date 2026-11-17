@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Command, encodeCreate, encodeModify } from '../protocol.js';
+import { Command, decodeMessage, encodeCreate, encodeModify } from '../protocol.js';
 import { InventoryConnection } from '../connection.js';
 
 const u32 = (...values) => {
@@ -83,4 +83,64 @@ test('saving refuses unknown items and overlapping requests', () => {
   assert.throws(() => connection.modify({ ...rifle, highId: 7 }, 'x'), /existing item/);
   connection.delete(42, 'Rifle');
   assert.throws(() => connection.modify(rifle, 'Rifle'), /no pending request/);
+});
+
+const crate = { highId: 0, inventory: 1, defIndex: 4029, level: 1, quality: 4, flags: 0, origin: 8, inUse: 0, rarity: 1, attributes: [], equips: [] };
+
+test('a single create is confirmed with its item id', () => {
+  const { connection, receive } = connected();
+  connection.create(crate, 'Case');
+  assert.equal(connection.creation.message, 'Creating Case (request 1)…');
+  receive(u32(Command.setId, 1, 200));
+  receive(encodeCreate(crate, 200));
+  assert.equal(connection.creation.status, 'confirmed');
+  assert.equal(connection.creation.highId, 200);
+  assert.equal(connection.creation.message, 'Created Case: item 200.');
+});
+
+test('a batch of creates goes in one message and is confirmed once every item arrives', () => {
+  const { connection, socket, receive } = connected();
+  connection.createMany([crate, crate, crate], 'containers');
+  assert.equal(socket.sent.length, 1);
+  assert.deepEqual(decodeMessage(socket.sent[0]).map(c => [c.type, c.item.highId]), [[Command.create, 1], [Command.create, 2], [Command.create, 3]]);
+  assert.equal(connection.canCreate, false, 'other changes wait for the batch');
+  // the GC answers every create with its own setId message, then sends the items together
+  receive(u32(Command.setId, 1, 100));
+  receive(u32(Command.setId, 2, 101));
+  receive(u32(Command.setId, 3, 102));
+  receive(concat(encodeCreate(crate, 100), encodeCreate(crate, 101)));
+  assert.equal(connection.creation.status, 'pending', 'one item is still missing');
+  receive(encodeCreate(crate, 102));
+  assert.equal(connection.creation.status, 'confirmed');
+  assert.equal(connection.creation.count, 3);
+  assert.deepEqual(connection.creation.highIds, [100, 101, 102]);
+  assert.equal(connection.creation.highId, undefined);
+  assert.equal(connection.creation.message, 'Created 3 containers.');
+  assert.equal(connection.canCreate, true);
+  connection.create(crate, 'Case');
+  assert.equal(connection.creation.requestId, 4, 'request IDs continue after the batch');
+});
+
+test('setId answers for other requests do not confirm a batch', () => {
+  const { connection, receive } = connected();
+  connection.createMany([crate, crate], 'containers');
+  receive(u32(Command.setId, 1, 100));
+  receive(u32(Command.setId, 9, 101));
+  receive(concat(encodeCreate(crate, 100), encodeCreate(crate, 101)));
+  assert.equal(connection.creation.status, 'pending');
+});
+
+test('disconnecting mid-batch reports it as unconfirmed', () => {
+  const { connection } = connected();
+  connection.createMany([crate, crate, crate], 'containers');
+  connection.disconnect();
+  assert.equal(connection.creation.status, 'unconfirmed');
+  assert.match(connection.creation.message, /^Disconnected before confirming 3 containers\. The items may already exist/);
+  assert.equal(connection.pendingCreate, null);
+});
+
+test('an empty batch is refused', () => {
+  const { connection, socket } = connected();
+  assert.throws(() => connection.createMany([], 'containers'), /Select something/);
+  assert.equal(socket.sent.length, 0);
 });

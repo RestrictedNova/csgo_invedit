@@ -20,6 +20,10 @@ let renderedWearKey = null, wearDirty = false;
 // Unsaved edits to the selected inventory item, keyed by field. Only touched fields are sent.
 let edits = {}, editsFor = null, savedEdits = null;
 const editInputs = { name: 'edit-name', wear: 'edit-wear', seed: 'edit-seed', counter: 'edit-counter' };
+// Adding everything the catalogue lists: batches the GC confirms one after another. More than
+// BULK_CONFIRM items takes a second click.
+const BULK_BATCH = 100, BULK_CONFIRM = 500;
+let bulk = null, bulkConfirm = null, bulkMessage = '', catalogueAddable = 0;
 function creationDraft() {
   draftError = '';
   if (!catalog || !selectedKey) return null;
@@ -149,7 +153,8 @@ function renderSelection() {
     $('wear-slider').value = wear;
   }
   renderedWearKey = controls?.painted ? record.key : null;
-  $('creation-status').textContent = connection.creation?.message || '';
+  $('creation-status').textContent = bulkMessage || connection.creation?.message || '';
+  renderBulk();
   $('view-created').hidden = !(connection.creation?.status === 'confirmed' && connection.inventory.items.has(connection.creation.highId));
   if (!hasSelection) { closeDrawer(false); return; }
   const info = presentation.item(item ?? { defIndex: record.defIndex }, record);
@@ -237,6 +242,8 @@ function renderCatalog(reset = false) {
   $('catalog-all').disabled = view !== 'definitions';
   $('advanced-label').hidden = view !== 'definitions';
   catalogueMatches = catalog.search({ view, category: $('catalog-category').value, query: $('catalog-search').value, allDefinitions: $('catalog-all').checked });
+  catalogueAddable = catalogueMatches.filter(record => record.template).length;
+  bulkConfirm = null;
   $('catalog-count').textContent = `${catalogueMatches.length.toLocaleString()} items`;
   catalogueGrid.setRecords(catalogueMatches, reset);
   renderSelection();
@@ -249,6 +256,7 @@ function rebuildInventory(reset = false) {
   inventoryGrid.setRecords(inventoryMatches, reset);
 }
 function renderInventory(current) {
+  continueBulk();
   $('status').textContent = current.status; $('message').textContent = current.message;
   $('connect').disabled = current.socket !== null; $('disconnect').disabled = current.socket === null;
   $('count').textContent = `(${current.inventory.items.size} items)`;
@@ -311,12 +319,88 @@ $('wear').addEventListener('keydown', event => {
   if (event.key === 'Enter') { event.preventDefault(); commitWear(); }
 });
 function addSelected() {
-  if (!connection.canCreate) return;
+  if (!connection.canCreate || bulk) return;
   commitWear();
+  bulkMessage = '';
   try { const record = catalog.records.get(selectedKey); connection.create(selectedTemplate(), record.name || record.internalName || record.key); }
   catch (error) { $('creation-status').textContent = error.message; }
 }
 $('create').addEventListener('click', addSelected);
+
+function renderBulk() {
+  const button = $('catalog-add-all');
+  button.disabled = Boolean(bulk) || !catalogueAddable || !connection.canCreate;
+  button.textContent = bulk ? 'Adding…'
+    : bulkConfirm ? `Click again to add ${bulkConfirm.toLocaleString()} items`
+    : `Add all ${catalogueAddable.toLocaleString()} to inventory`;
+  const cancel = $('catalog-add-all-cancel');
+  cancel.hidden = !bulk && !bulkConfirm;
+  cancel.textContent = bulk ? (bulk.stop ? 'Stopping…' : 'Stop') : 'Cancel';
+  cancel.disabled = Boolean(bulk?.stop);
+}
+// Default creation settings for every item, whatever the inspector is set to.
+function addAllListed() {
+  if (bulk || !catalog || !connection.canCreate) return;
+  const defaults = new CreationPreferences();
+  const items = [];
+  let skipped = 0;
+  for (const record of catalogueMatches) {
+    try { items.push(defaults.build(catalog, record.key).item); }
+    catch { skipped++; }
+  }
+  if (!items.length) return;
+  if (items.length > BULK_CONFIRM && bulkConfirm !== items.length) {
+    bulkConfirm = items.length;
+    renderBulk();
+    return;
+  }
+  bulkConfirm = null;
+  bulk = { items, skipped, sent: 0, added: 0, requestId: null, sending: false, stop: false };
+  continueBulk();
+  renderSelection();
+}
+function finishBulk(message) {
+  const skipped = bulk.skipped ? ` ${bulk.skipped.toLocaleString()} listed items can't be created and were skipped.` : '';
+  bulk = null;
+  bulkMessage = message + skipped;
+}
+// Runs on every connection change: sends the next batch once the last one is confirmed.
+function continueBulk() {
+  if (!bulk || bulk.sending) return;
+  const total = bulk.items.length.toLocaleString();
+  if (bulk.requestId !== null) {
+    const creation = connection.creation;
+    if (creation?.requestId === bulk.requestId && creation.status === 'pending') return;
+    if (creation?.requestId !== bulk.requestId || creation.status !== 'confirmed') {
+      finishBulk(`Stopped after adding ${bulk.added.toLocaleString()} of ${total} items. ${creation?.message ?? ''}`.trim());
+      return;
+    }
+    bulk.added += creation.count;
+    bulk.requestId = null;
+  }
+  if (bulk.sent === bulk.items.length) { finishBulk(`Added ${total} items to the inventory.`); return; }
+  if (bulk.stop) { finishBulk(`Stopped after adding ${bulk.added.toLocaleString()} of ${total} items.`); return; }
+  if (!connection.canCreate) {
+    if (!connection.socket) finishBulk(`Stopped after adding ${bulk.added.toLocaleString()} of ${total} items: disconnected.`);
+    return;
+  }
+  const batch = bulk.items.slice(bulk.sent, bulk.sent + BULK_BATCH);
+  bulk.sent += batch.length;
+  bulkMessage = `Adding ${total} items to the inventory: ${bulk.added.toLocaleString()} done…`;
+  // createMany reports back synchronously; that must not start another batch
+  bulk.sending = true;
+  try { connection.createMany(batch, 'items'); }
+  catch (error) { bulk.sending = false; finishBulk(`Stopped after adding ${bulk.added.toLocaleString()} of ${total} items. ${error.message}`); return; }
+  bulk.sending = false;
+  bulk.requestId = connection.creation.requestId;
+  if (connection.creation.status !== 'pending') continueBulk();
+}
+$('catalog-add-all').addEventListener('click', addAllListed);
+$('catalog-add-all-cancel').addEventListener('click', () => {
+  if (bulk) bulk.stop = true;
+  bulkConfirm = null;
+  renderBulk();
+});
 $('delete').addEventListener('click', () => {
   const item = connection.inventory.items.get(selectedId);
   if (!item || !connection.canMutate) return;

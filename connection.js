@@ -97,26 +97,39 @@ export class InventoryConnection {
   }
 
   create(template, label) {
-    if (!this.canCreate) throw new Error('Creation requires a synchronized open connection and no pending request.');
+    this.createMany([template], label);
+  }
+
+  // Several creates in one message, each with its own request ID. The GC answers every one with
+  // setId and sends the new items back together, so the batch is confirmed once all have arrived.
+  // A single item is confirmed with its highId; a batch with highIds and no highId.
+  createMany(templates, label) {
+    if (!Array.isArray(templates) || !templates.length) throw new Error('Select something to create.');
+    if (!this.canCreate || this.nextRequestId + templates.length - 1 > 0xffffffff) throw new Error('Creation requires a synchronized open connection and no pending request.');
     const requestId = this.nextRequestId;
-    const draft = structuredClone(template);
-    const bytes = encodeCreate(draft, requestId);
-    this.nextRequestId++;
-    const pending = { requestId, label, assignedId: null, observedIds: new Set() };
+    const count = templates.length;
+    const requestIds = templates.map((_, i) => requestId + i);
+    const parts = templates.map((template, i) => new Uint8Array(encodeCreate(structuredClone(template), requestIds[i])));
+    const bytes = new Uint8Array(parts.reduce((size, part) => size + part.byteLength, 0));
+    parts.reduce((offset, part) => { bytes.set(part, offset); return offset + part.byteLength; }, 0);
+    this.nextRequestId += count;
+    const what = count === 1 ? label : `${count.toLocaleString()} ${label}`;
+    const pending = { requestId, requestIds, count, label, what, assigned: new Map(), observedIds: new Set() };
     this.pendingCreate = pending;
-    this.creation = { status: 'pending', requestId, label, message: `Creating ${label} (request ${requestId})…` };
+    const record = { requestId, count, label };
+    this.creation = { ...record, status: 'pending', message: count === 1 ? `Creating ${label} (request ${requestId})…` : `Creating ${what}…` };
     try {
-      this.socket.send(bytes);
+      this.socket.send(bytes.buffer);
     } catch (error) {
       this.pendingCreate = null;
-      this.creation = { status: 'failed', requestId, label, message: `Send failed: ${error.message}` };
+      this.creation = { ...record, status: 'failed', message: `Send failed: ${error.message}` };
       this.onChange(this);
       return;
     }
     this.createTimer = this.setTimer(() => {
       if (this.pendingCreate !== pending) return;
       this.createTimer = null;
-      this.creation = { status: 'uncertain', requestId, label, message: `Creation of ${label} is unconfirmed. It may already exist. Wait for confirmation or reconnect and inspect the fresh inventory before creating again.` };
+      this.creation = { ...record, status: 'uncertain', message: `Creation of ${what} is unconfirmed. ${count === 1 ? 'It' : 'They'} may already exist. Wait for confirmation or reconnect and inspect the fresh inventory before creating again.` };
       this.onChange(this);
     }, 10000);
     this.onChange(this);
@@ -126,15 +139,21 @@ export class InventoryConnection {
     const pending = this.pendingCreate;
     if (!pending) return;
     for (const command of commands) {
-      if (command.type === Command.setId && command.requestId === pending.requestId) pending.assignedId = command.highId;
+      if (command.type === Command.setId && command.requestId >= pending.requestId && command.requestId < pending.requestId + pending.count) {
+        pending.assigned.set(command.requestId, command.highId);
+      }
       if (command.type === Command.create || command.type === Command.modify) pending.observedIds.add(command.item.highId);
     }
-    if (pending.assignedId !== null && pending.observedIds.has(pending.assignedId) && this.inventory.items.has(pending.assignedId)) {
-      this.clearTimer(this.createTimer);
-      this.createTimer = null;
-      this.creation = { status: 'confirmed', requestId: pending.requestId, label: pending.label, highId: pending.assignedId, message: `Created ${pending.label}: item ${pending.assignedId}.` };
-      this.pendingCreate = null;
-    }
+    if (pending.assigned.size !== pending.count) return;
+    const ids = pending.requestIds.map(id => pending.assigned.get(id));
+    if (!ids.every(id => pending.observedIds.has(id) && this.inventory.items.has(id))) return;
+    this.clearTimer(this.createTimer);
+    this.createTimer = null;
+    const record = { status: 'confirmed', requestId: pending.requestId, count: pending.count, label: pending.label };
+    this.creation = pending.count === 1
+      ? { ...record, highId: ids[0], message: `Created ${pending.label}: item ${ids[0]}.` }
+      : { ...record, highIds: ids, message: `Created ${pending.what}.` };
+    this.pendingCreate = null;
   }
 
   publish(status, message = '') {
@@ -163,7 +182,8 @@ export class InventoryConnection {
     this.clearTimer(this.createTimer);
     this.createTimer = null;
     if (this.pendingCreate) {
-      this.creation = { status: 'unconfirmed', requestId: this.pendingCreate.requestId, label: this.pendingCreate.label, message: `Disconnected before confirming ${this.pendingCreate.label}. The item may already exist. Inspect the fresh inventory after reconnecting; this request will not be retried.` };
+      const { requestId, count, label, what } = this.pendingCreate;
+      this.creation = { status: 'unconfirmed', requestId, count, label, message: `Disconnected before confirming ${what}. ${count === 1 ? 'The item' : 'The items'} may already exist. Inspect the fresh inventory after reconnecting; this request will not be retried.` };
     }
     this.pendingCreate = null;
     if (this.creation?.status === 'confirmed') this.creation = null;
